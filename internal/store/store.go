@@ -237,7 +237,7 @@ func (s *Store) ListPlanSnapshots(ctx context.Context, taskID string) ([]domain.
 	cached, ok := s.planSnapshotCache[taskID]
 	s.planSnapshotsMu.RUnlock()
 	if ok {
-		return cached, nil
+		return clonePlanSnapshots(cached), nil
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT task_id,plan_version,segments_json,published_by,published_at FROM plan_snapshots WHERE task_id=? ORDER BY plan_version`, taskID)
 	if err != nil {
@@ -261,7 +261,32 @@ func (s *Store) ListPlanSnapshots(ctx context.Context, taskID string) ([]domain.
 	s.planSnapshotsMu.Lock()
 	s.planSnapshotCache[taskID] = out
 	s.planSnapshotsMu.Unlock()
-	return out, nil
+	return clonePlanSnapshots(out), nil
+}
+
+// clonePlanSnapshots returns a deep copy of the plan snapshots so that callers
+// mutating the returned snapshots (including nested Segments and their pointer
+// fields) cannot pollute the in-memory cache or other readers.
+func clonePlanSnapshots(in []domain.PlanSnapshot) []domain.PlanSnapshot {
+	if in == nil {
+		return nil
+	}
+	out := make([]domain.PlanSnapshot, len(in))
+	for i := range in {
+		out[i] = in[i]
+		if len(in[i].Segments) > 0 {
+			segs := make([]domain.SealSegment, len(in[i].Segments))
+			for j := range in[i].Segments {
+				segs[j] = in[i].Segments[j]
+				if in[i].Segments[j].PerformedAt != nil {
+					v := *in[i].Segments[j].PerformedAt
+					segs[j].PerformedAt = &v
+				}
+			}
+			out[i].Segments = segs
+		}
+	}
+	return out
 }
 
 func (s *Store) GetPlanSnapshot(ctx context.Context, taskID string, version int64) (domain.PlanSnapshot, error) {
