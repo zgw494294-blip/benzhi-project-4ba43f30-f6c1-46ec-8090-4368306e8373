@@ -41,7 +41,7 @@ func (s *Store) migrate() error {
 		`CREATE TABLE IF NOT EXISTS segments (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, from_depth_m REAL NOT NULL, to_depth_m REAL NOT NULL, material_type TEXT NOT NULL, planned_volume_l REAL NOT NULL, mix_ratio TEXT NOT NULL, actual_volume_l REAL NOT NULL DEFAULT 0, actual_mix_ratio TEXT NOT NULL DEFAULT '', material_batch TEXT NOT NULL DEFAULT '', performed_at TEXT, operator TEXT NOT NULL DEFAULT '', result TEXT NOT NULL, variance_percent REAL NOT NULL DEFAULT 0, version INTEGER NOT NULL, UNIQUE(task_id, sequence))`,
 		`CREATE TABLE IF NOT EXISTS deviations (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, segment_id TEXT NOT NULL REFERENCES segments(id), code TEXT NOT NULL, description TEXT NOT NULL, severity TEXT NOT NULL, evidence_note TEXT NOT NULL, correction TEXT NOT NULL DEFAULT '', waiver_reason TEXT NOT NULL DEFAULT '', rework_required INTEGER NOT NULL DEFAULT 0, reviewer TEXT NOT NULL DEFAULT '', review_note TEXT NOT NULL DEFAULT '', review_result TEXT NOT NULL DEFAULT '', reviewed_at TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(task_id, code))`,
 		`CREATE TABLE IF NOT EXISTS credentials (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), serial_no TEXT NOT NULL UNIQUE, manifest_digest TEXT NOT NULL, issued_by TEXT NOT NULL, issued_at TEXT NOT NULL, payload_json TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS idempotency (task_id TEXT NOT NULL, idem_key TEXT NOT NULL, response_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(task_id, idem_key))`,
+		`CREATE TABLE IF NOT EXISTS idempotency (task_id TEXT NOT NULL, operation TEXT NOT NULL DEFAULT '', idem_key TEXT NOT NULL, response_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(task_id, operation, idem_key))`,
 		`CREATE TABLE IF NOT EXISTS audit_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, object_version INTEGER NOT NULL, idempotency_key TEXT NOT NULL DEFAULT '', payload_json TEXT NOT NULL, previous_digest TEXT NOT NULL, digest TEXT NOT NULL, created_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS plan_snapshots (task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, plan_version INTEGER NOT NULL, segments_json TEXT NOT NULL, published_by TEXT NOT NULL, published_at TEXT NOT NULL, PRIMARY KEY(task_id, plan_version))`,
 		`CREATE TABLE IF NOT EXISTS reworks (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, deviation_id TEXT NOT NULL REFERENCES deviations(id), segment_id TEXT NOT NULL REFERENCES segments(id), material_type TEXT NOT NULL, material_batch TEXT NOT NULL, actual_mix_ratio TEXT NOT NULL, actual_volume_l REAL NOT NULL, performed_at TEXT NOT NULL, operator TEXT NOT NULL, result TEXT NOT NULL, evidence_note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
@@ -53,7 +53,72 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("数据库迁移失败: %w", err)
 		}
 	}
+	if err := s.migrateIdempotencyOperationColumn(ctx); err != nil {
+		return fmt.Errorf("数据库迁移失败: %w", err)
+	}
 	return nil
+}
+
+// migrateIdempotencyOperationColumn upgrades pre-existing idempotency tables
+// that were created without the operation column. Existing cached responses
+// are preserved and attributed to an empty operation so prior replays keep
+// working for the operation that originally stored them.
+func (s *Store) migrateIdempotencyOperationColumn(ctx context.Context) error {
+	var columns []string
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(idempotency)`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		columns = append(columns, name)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	hasOperation := false
+	for _, name := range columns {
+		if name == "operation" {
+			hasOperation = true
+			break
+		}
+	}
+	if hasOperation {
+		return nil
+	}
+	// SQLite cannot alter primary key constraints in place; rebuild the table.
+	// The idempotency cache holds replayable responses only, but we still
+	// perform the rebuild in a single transaction so a crash leaves either the
+	// old table intact or the new table fully published.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	tempName := "idempotency_new"
+	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS ` + tempName); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE ` + tempName + ` (task_id TEXT NOT NULL, operation TEXT NOT NULL DEFAULT '', idem_key TEXT NOT NULL, response_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(task_id, operation, idem_key))`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO ` + tempName + ` (task_id, operation, idem_key, response_json, created_at) SELECT task_id, '', idem_key, response_json, created_at FROM idempotency`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE idempotency`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE ` + tempName + ` RENAME TO idempotency`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DB() *sql.DB { return s.db }
@@ -494,22 +559,22 @@ func (s *Store) NextSerial(ctx context.Context) (string, error) {
 	return fmt.Sprintf("SH-%06d", n), err
 }
 
-func (s *Store) GetIdempotent(ctx context.Context, taskID, key string) (string, bool, error) {
+func (s *Store) GetIdempotent(ctx context.Context, taskID, operation, key string) (string, bool, error) {
 	if strings.TrimSpace(key) == "" {
 		return "", false, nil
 	}
 	var response string
-	err := s.db.QueryRowContext(ctx, `SELECT response_json FROM idempotency WHERE task_id=? AND idem_key=?`, taskID, key).Scan(&response)
+	err := s.db.QueryRowContext(ctx, `SELECT response_json FROM idempotency WHERE task_id=? AND operation=? AND idem_key=?`, taskID, operation, key).Scan(&response)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
 	return response, err == nil, err
 }
-func (s *Store) PutIdempotent(ctx context.Context, taskID, key, response string) error {
+func (s *Store) PutIdempotent(ctx context.Context, taskID, operation, key, response string) error {
 	if strings.TrimSpace(key) == "" {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO idempotency(task_id,idem_key,response_json,created_at) VALUES(?,?,?,?)`, taskID, key, response, time.Now().Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO idempotency(task_id,operation,idem_key,response_json,created_at) VALUES(?,?,?,?,?)`, taskID, operation, key, response, time.Now().Format(time.RFC3339Nano))
 	return err
 }
 func (s *Store) AuditEvents(ctx context.Context) ([]domain.AuditEvent, error) {

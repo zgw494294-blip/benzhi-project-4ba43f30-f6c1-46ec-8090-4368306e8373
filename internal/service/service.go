@@ -34,6 +34,18 @@ type CreateTaskInput struct {
 	Actor          domain.Actor `json:"actor"`
 }
 
+// idempotent operations are namespaced per write kind so the same raw
+// idempotency key cannot be replayed across different operations.
+const (
+	idemOperationConstruction = "construction"
+	idemOperationDeviation     = "deviation"
+	idemOperationCorrection    = "correction"
+	idemOperationReview        = "review"
+	idemOperationFreeze        = "freeze"
+	idemOperationCredential    = "credential"
+	idemOperationRework        = "rework"
+)
+
 func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain.SealTask, error) {
 	if err := requireRole(input.Actor, domain.RoleManager); err != nil {
 		return domain.SealTask{}, err
@@ -183,7 +195,7 @@ func (s *Service) RecordConstruction(ctx context.Context, taskID string, input C
 	if err := requireKey(input.IdempotencyKey); err != nil {
 		return ConstructionResult{}, err
 	}
-	if cached, ok, err := s.store.GetIdempotent(ctx, taskID, input.IdempotencyKey); err != nil {
+	if cached, ok, err := s.store.GetIdempotent(ctx, taskID, idemOperationConstruction, input.IdempotencyKey); err != nil {
 		return ConstructionResult{}, err
 	} else if ok {
 		var result ConstructionResult
@@ -256,7 +268,7 @@ func (s *Service) RecordConstruction(ctx context.Context, taskID string, input C
 		result.AutoDeviation = &item
 	}
 	encoded, _ := json.Marshal(result)
-	if err := s.store.PutIdempotent(ctx, taskID, input.IdempotencyKey, string(encoded)); err != nil {
+	if err := s.store.PutIdempotent(ctx, taskID, idemOperationConstruction, input.IdempotencyKey, string(encoded)); err != nil {
 		return result, err
 	}
 	if err := s.audit.Append(ctx, taskID, input.Actor, "construction.recorded", task.Version, input.IdempotencyKey, result); err != nil {
@@ -295,7 +307,7 @@ func (s *Service) CreateDeviation(ctx context.Context, taskID string, input Crea
 	if err := requireKey(input.IdempotencyKey); err != nil {
 		return domain.DeviationCase{}, err
 	}
-	if cached, ok, err := s.store.GetIdempotent(ctx, taskID, input.IdempotencyKey); err != nil {
+	if cached, ok, err := s.store.GetIdempotent(ctx, taskID, idemOperationDeviation, input.IdempotencyKey); err != nil {
 		return domain.DeviationCase{}, err
 	} else if ok {
 		var item domain.DeviationCase
@@ -334,7 +346,7 @@ func (s *Service) CreateDeviation(ctx context.Context, taskID string, input Crea
 		return item, err
 	}
 	encoded, _ := json.Marshal(item)
-	_ = s.store.PutIdempotent(ctx, taskID, input.IdempotencyKey, string(encoded))
+	_ = s.store.PutIdempotent(ctx, taskID, idemOperationDeviation, input.IdempotencyKey, string(encoded))
 	_ = s.audit.Append(ctx, taskID, input.Actor, "deviation.created", task.Version, input.IdempotencyKey, item)
 	return item, nil
 }
@@ -357,7 +369,7 @@ func (s *Service) CorrectDeviation(ctx context.Context, taskID string, input Cor
 	if err := requireKey(input.IdempotencyKey); err != nil {
 		return domain.DeviationCase{}, err
 	}
-	if cached, ok, err := s.store.GetIdempotent(ctx, taskID, input.IdempotencyKey); err != nil {
+	if cached, ok, err := s.store.GetIdempotent(ctx, taskID, idemOperationCorrection, input.IdempotencyKey); err != nil {
 		return domain.DeviationCase{}, err
 	} else if ok {
 		var item domain.DeviationCase
@@ -398,7 +410,7 @@ func (s *Service) CorrectDeviation(ctx context.Context, taskID string, input Cor
 		return item, err
 	}
 	encoded, _ := json.Marshal(item)
-	_ = s.store.PutIdempotent(ctx, taskID, input.IdempotencyKey, string(encoded))
+	_ = s.store.PutIdempotent(ctx, taskID, idemOperationCorrection, input.IdempotencyKey, string(encoded))
 	_ = s.audit.Append(ctx, taskID, input.Actor, "deviation.corrected", task.Version, input.IdempotencyKey, item)
 	return item, nil
 }
@@ -420,7 +432,7 @@ func (s *Service) ReviewDeviation(ctx context.Context, taskID string, input Revi
 	if err := requireKey(input.IdempotencyKey); err != nil {
 		return domain.DeviationCase{}, err
 	}
-	if cached, ok, err := s.store.GetIdempotent(ctx, taskID, input.IdempotencyKey); err != nil {
+	if cached, ok, err := s.store.GetIdempotent(ctx, taskID, idemOperationReview, input.IdempotencyKey); err != nil {
 		return domain.DeviationCase{}, err
 	} else if ok {
 		var item domain.DeviationCase
@@ -494,7 +506,7 @@ func (s *Service) ReviewDeviation(ctx context.Context, taskID string, input Revi
 		return item, err
 	}
 	encoded, _ := json.Marshal(item)
-	_ = s.store.PutIdempotent(ctx, taskID, input.IdempotencyKey, string(encoded))
+	_ = s.store.PutIdempotent(ctx, taskID, idemOperationReview, input.IdempotencyKey, string(encoded))
 	_ = s.audit.Append(ctx, taskID, input.Actor, "deviation.reviewed", task.Version, input.IdempotencyKey, item)
 	return item, nil
 }
@@ -514,7 +526,7 @@ func (s *Service) Freeze(ctx context.Context, taskID string, input FreezeInput) 
 	if err := requireKey(input.IdempotencyKey); err != nil {
 		return domain.SealTask{}, err
 	}
-	if cached, ok, err := s.store.GetIdempotent(ctx, taskID, input.IdempotencyKey); err != nil {
+	if cached, ok, err := s.store.GetIdempotent(ctx, taskID, idemOperationFreeze, input.IdempotencyKey); err != nil {
 		return domain.SealTask{}, err
 	} else if ok {
 		var task domain.SealTask
@@ -557,7 +569,7 @@ func (s *Service) Freeze(ctx context.Context, taskID string, input FreezeInput) 
 		return task, err
 	}
 	encoded, _ := json.Marshal(task)
-	_ = s.store.PutIdempotent(ctx, taskID, input.IdempotencyKey, string(encoded))
+	_ = s.store.PutIdempotent(ctx, taskID, idemOperationFreeze, input.IdempotencyKey, string(encoded))
 	_ = s.audit.Append(ctx, taskID, input.Actor, "manifest.frozen", task.Version, input.IdempotencyKey, map[string]string{"digest": digest})
 	return task, nil
 }
@@ -575,7 +587,7 @@ func (s *Service) IssueCredential(ctx context.Context, taskID string, input Issu
 	if err := requireKey(input.IdempotencyKey); err != nil {
 		return domain.HandoverCredential{}, err
 	}
-	if cached, ok, err := s.store.GetIdempotent(ctx, taskID, input.IdempotencyKey); err != nil {
+	if cached, ok, err := s.store.GetIdempotent(ctx, taskID, idemOperationCredential, input.IdempotencyKey); err != nil {
 		return domain.HandoverCredential{}, err
 	} else if ok {
 		var c domain.HandoverCredential
@@ -612,7 +624,7 @@ func (s *Service) IssueCredential(ctx context.Context, taskID string, input Issu
 		return c, err
 	}
 	encoded, _ := json.Marshal(c)
-	_ = s.store.PutIdempotent(ctx, taskID, input.IdempotencyKey, string(encoded))
+	_ = s.store.PutIdempotent(ctx, taskID, idemOperationCredential, input.IdempotencyKey, string(encoded))
 	_ = s.audit.Append(ctx, taskID, input.Actor, "credential.issued", task.Version, input.IdempotencyKey, c)
 	return c, nil
 }
@@ -680,7 +692,7 @@ func (s *Service) RecordRework(ctx context.Context, taskID string, input ReworkI
 	if err := requireKey(input.IdempotencyKey); err != nil {
 		return domain.ReworkRecord{}, err
 	}
-	if cached, ok, err := s.store.GetIdempotent(ctx, taskID, input.IdempotencyKey); err != nil {
+	if cached, ok, err := s.store.GetIdempotent(ctx, taskID, idemOperationRework, input.IdempotencyKey); err != nil {
 		return domain.ReworkRecord{}, err
 	} else if ok {
 		var x domain.ReworkRecord
@@ -757,7 +769,7 @@ func (s *Service) RecordRework(ctx context.Context, taskID string, input ReworkI
 		return record, err
 	}
 	encoded, _ := json.Marshal(record)
-	_ = s.store.PutIdempotent(ctx, taskID, input.IdempotencyKey, string(encoded))
+	_ = s.store.PutIdempotent(ctx, taskID, idemOperationRework, input.IdempotencyKey, string(encoded))
 	_ = s.audit.Append(ctx, taskID, input.Actor, "rework.recorded", task.Version, input.IdempotencyKey, record)
 	return record, nil
 }
