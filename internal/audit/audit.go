@@ -46,11 +46,19 @@ func (c *Chain) Append(ctx context.Context, taskID string, actor domain.Actor, a
 	if len(events) > 0 {
 		previous = events[len(events)-1].Digest
 	}
-	created := c.now().UTC()
-	content := eventContent{TaskID: taskID, Actor: actor.Name, Action: action, ObjectVersion: version, IdempotencyKey: key, PayloadJSON: string(encoded), PreviousDigest: previous, CreatedAt: created.Format(time.RFC3339Nano)}
-	canonical, _ := json.Marshal(content)
-	event := domain.AuditEvent{TaskID: taskID, Actor: actor.Name, Action: action, ObjectVersion: version, IdempotencyKey: key, PayloadJSON: string(encoded), PreviousDigest: previous, Digest: eventDigest(canonical), CreatedAt: created}
+	event := c.BuildEvent(taskID, actor, action, version, key, string(encoded), previous)
 	return c.store.AppendAudit(ctx, event)
+}
+
+// BuildEvent assembles an audit event (including digest) from its inputs and
+// the previous chain digest. It performs no database I/O, so callers can use
+// it inside a transaction that also writes the task data, ensuring the audit
+// event and its business data commit atomically.
+func (c *Chain) BuildEvent(taskID string, actor domain.Actor, action string, version int64, key, payloadJSON, previousDigest string) domain.AuditEvent {
+	created := c.now().UTC()
+	content := eventContent{TaskID: taskID, Actor: actor.Name, Action: action, ObjectVersion: version, IdempotencyKey: key, PayloadJSON: payloadJSON, PreviousDigest: previousDigest, CreatedAt: created.Format(time.RFC3339Nano)}
+	canonical, _ := json.Marshal(content)
+	return domain.AuditEvent{TaskID: taskID, Actor: actor.Name, Action: action, ObjectVersion: version, IdempotencyKey: key, PayloadJSON: payloadJSON, PreviousDigest: previousDigest, Digest: eventDigest(canonical), CreatedAt: created}
 }
 
 func (c *Chain) Verify(ctx context.Context) error {

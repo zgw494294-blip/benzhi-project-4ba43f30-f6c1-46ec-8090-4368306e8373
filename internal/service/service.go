@@ -48,13 +48,22 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 	} else if ok {
 		return task, domain.DuplicateTask(matched.TaskCode)
 	}
-	if err := s.store.CreateTask(ctx, task); err != nil {
+	if err := s.store.CreateTaskWithAudit(ctx, task, func(previousDigest string) (domain.AuditEvent, error) {
+		if err := requireRole(input.Actor, domain.RoleManager); err != nil {
+			return domain.AuditEvent{}, err
+		}
+		if strings.TrimSpace(input.Actor.Name) == "" {
+			return domain.AuditEvent{}, domain.Validation("actor", "审计操作者不能为空")
+		}
+		encoded, err := json.Marshal(task)
+		if err != nil {
+			return domain.AuditEvent{}, fmt.Errorf("编码审计载荷: %w", err)
+		}
+		return s.audit.BuildEvent(task.ID, input.Actor, "task.created", task.Version, "", string(encoded), previousDigest), nil
+	}); err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return task, domain.Validation("taskCode", "任务编号已存在")
 		}
-		return task, err
-	}
-	if err := s.audit.Append(ctx, task.ID, input.Actor, "task.created", task.Version, "", task); err != nil {
 		return task, err
 	}
 	return task, nil

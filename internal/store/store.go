@@ -63,6 +63,38 @@ func (s *Store) CreateTask(ctx context.Context, task domain.SealTask) error {
 	return err
 }
 
+// CreateTaskWithAudit inserts a task and its first audit event in a single
+// transaction so that an audit-store failure rolls back the task data too.
+// buildAudit receives the previous chain digest read within the same
+// transaction and returns the audit event to append. If buildAudit returns an
+// error the transaction is rolled back and no task row is committed.
+func (s *Store) CreateTaskWithAudit(ctx context.Context, task domain.SealTask, buildAudit func(previousDigest string) (domain.AuditEvent, error)) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO tasks(id,task_code,site_name,borehole_no,collar_easting,collar_northing,total_depth_m,strata_summary,status,version,plan_version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, task.ID, task.TaskCode, task.SiteName, task.BoreholeNo, task.CollarEasting, task.CollarNorthing, task.TotalDepthM, task.StrataSummary, task.Status, task.Version, task.PlanVersion, task.CreatedAt.Format(time.RFC3339Nano), task.UpdatedAt.Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	var previous string
+	row := tx.QueryRowContext(ctx, `SELECT digest FROM audit_events ORDER BY sequence DESC LIMIT 1`)
+	if err = row.Scan(&previous); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		previous = ""
+	}
+	event, err := buildAudit(previous)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events(task_id,actor,action,object_version,idempotency_key,payload_json,previous_digest,digest,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, event.TaskID, event.Actor, event.Action, event.ObjectVersion, event.IdempotencyKey, event.PayloadJSON, event.PreviousDigest, event.Digest, event.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) GetTask(ctx context.Context, id string) (domain.SealTask, error) {
 	var task domain.SealTask
 	var frozen, created, updated sql.NullString
