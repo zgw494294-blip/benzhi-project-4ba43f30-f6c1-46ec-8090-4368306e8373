@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"drill-seal-handover/internal/audit"
@@ -18,6 +19,7 @@ type Service struct {
 	audit          *audit.Chain
 	now            func() time.Time
 	preflightCache map[string]string
+	preflightMu    sync.RWMutex
 }
 
 func New(repository *store.Store) *Service {
@@ -788,7 +790,10 @@ func (s *Service) Preflight(ctx context.Context, taskID string) (domain.ReleaseP
 		return domain.ReleasePreflight{}, err
 	}
 	cacheKey := fmt.Sprintf("%s:%d", taskID, task.Version)
-	if cached, ok := s.preflightCache[cacheKey]; ok {
+	s.preflightMu.RLock()
+	cached, ok := s.preflightCache[cacheKey]
+	s.preflightMu.RUnlock()
+	if ok {
 		var out domain.ReleasePreflight
 		if err := json.Unmarshal([]byte(cached), &out); err == nil {
 			return out, nil
@@ -827,7 +832,9 @@ func (s *Service) Preflight(ctx context.Context, taskID string) (domain.ReleaseP
 		out.ManifestDigest = digest
 	}
 	if encoded, err := json.Marshal(out); err == nil {
+		s.preflightMu.Lock()
 		s.preflightCache[cacheKey] = string(encoded)
+		s.preflightMu.Unlock()
 	}
 	return out, nil
 }
