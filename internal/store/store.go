@@ -87,20 +87,29 @@ func (s *Store) ListTasks(ctx context.Context) ([]domain.SealTask, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var result []domain.SealTask
+	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
+			rows.Close()
 			return nil, err
 		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	var result []domain.SealTask
+	for _, id := range ids {
 		task, err := s.GetTask(ctx, id)
 		if err != nil {
 			return nil, err
 		}
 		result = append(result, task)
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 func (s *Store) FindActiveBorehole(ctx context.Context, siteName, boreholeNo string) (domain.SealTask, bool, error) {
