@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>钻孔封孔移交工作台</title><link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+  <header><div><span class="eyebrow">DRILL SEAL / QUALITY CONTROL</span><h1>钻孔封孔移交工作台</h1><p>施工事实、偏差复验与不可变移交凭据集中管理。</p></div><div class="status"><span id="connectionDot"></span><span id="connectionText">本地服务</span></div></header>
+  <main>
+    <section class="toolbar"><label>当前任务<select id="taskSelect"><option value="">选择或新建任务</option></select></label><button id="refreshBtn" class="secondary">刷新</button><button id="newTaskBtn">新建任务</button></section>
+    <section id="emptyState" class="empty"><h2>开始一项封孔任务</h2><p>先登记钻孔基本资料，再发布分段方案。</p></section>
+    <section id="taskPanel" hidden>
+      <div class="summary"><div><span class="label">任务编号</span><strong id="taskCode"></strong></div><div><span class="label">场地 / 钻孔</span><strong id="siteInfo"></strong></div><div><span class="label">状态</span><strong id="taskStatus"></strong></div><div><span class="label">版本</span><strong id="taskVersion"></strong></div></div>
+      <nav class="tabs"><button data-tab="plan" class="active">封孔方案</button><button data-tab="construction">施工记录</button><button data-tab="deviations">偏差与复验</button><button data-tab="handover">冻结与移交</button></nav>
+      <div id="tab-plan" class="tab"><div class="sectionHead"><div><h2>分段封孔方案</h2><p>深度必须连续覆盖至孔底，计划量和材料配比会进入移交清单。</p></div><button id="addSegmentBtn" class="secondary">添加孔段</button></div><form id="planForm"><div id="segmentsEditor"></div><button type="submit">发布方案</button></form></div>
+      <div id="tab-construction" class="tab" hidden><div class="sectionHead"><div><h2>实际施工记录</h2><p>每段仅可登记一次施工事实，超出计划量 10% 会自动形成偏差。</p></div></div><div id="progressSummary" class="progressSummary"></div><div id="batchSummary" class="batchSummary"></div><div id="constructionList"></div></div>
+      <div id="tab-deviations" class="tab" hidden><div class="sectionHead"><div><h2>偏差整改与质量复验</h2><p>负责人补充整改措施，质量复核员逐项通过或退回。</p></div></div><div id="deviationList"></div></div>
+      <div id="tab-handover" class="tab" hidden><div class="sectionHead"><div><h2>冻结与场地移交</h2><p>所有孔段完成、偏差闭合后才能冻结清单并签发凭据。</p></div></div><div id="handoverPanel"></div></div>
+    </section>
+  </main>
+  <dialog id="taskDialog"><form method="dialog" id="taskForm"><h2>新建封孔任务</h2><label>任务编号<input name="taskCode" required></label><label>场地名称<input name="siteName" required></label><label>钻孔编号<input name="boreholeNo" required></label><div class="grid"><label>孔口东坐标<input name="collarEasting" type="number" step="0.001" required></label><label>孔口北坐标<input name="collarNorthing" type="number" step="0.001" required></label></div><label>孔深（米）<input name="totalDepthM" type="number" step="0.001" required></label><label>地层摘要<textarea name="strataSummary" required></textarea></label><div class="dialogActions"><button value="cancel" class="secondary">取消</button><button value="default">创建任务</button></div></form></dialog>
+  <script src="/web/app.js"></script>
+</body></html>
