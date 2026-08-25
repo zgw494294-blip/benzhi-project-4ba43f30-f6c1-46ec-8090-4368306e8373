@@ -647,7 +647,7 @@ func (s *Service) GetAggregate(ctx context.Context, taskID string) (domain.Aggre
 	} else {
 		agg.Reviews = reviews
 	}
-	credential, err := s.store.GetCredential(ctx, taskID)
+	credential, err := s.store.GetCredentialFresh(ctx, taskID)
 	if err == nil {
 		agg.Credential = &credential
 	} else if domain.KindOf(err) != domain.KindNotFound {

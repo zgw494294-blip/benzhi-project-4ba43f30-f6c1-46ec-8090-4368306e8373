@@ -7,13 +7,23 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"drill-seal-handover/internal/domain"
 	_ "modernc.org/sqlite"
 )
 
-type Store struct{ db *sql.DB }
+type credentialCacheEntry struct {
+	credential domain.HandoverCredential
+	found      bool
+}
+
+type Store struct {
+	db              *sql.DB
+	credentialMu    sync.RWMutex
+	credentialCache map[string]credentialCacheEntry
+}
 
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
@@ -21,7 +31,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(sqliteConnectionLimit)
-	s := &Store{db: db}
+	s := &Store{db: db, credentialCache: make(map[string]credentialCacheEntry)}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -476,16 +486,50 @@ func (s *Store) CreateCredential(ctx context.Context, c domain.HandoverCredentia
 	return err
 }
 func (s *Store) GetCredential(ctx context.Context, taskID string) (domain.HandoverCredential, error) {
+	return s.getCredential(ctx, taskID, true)
+}
+
+func (s *Store) GetCredentialFresh(ctx context.Context, taskID string) (domain.HandoverCredential, error) {
+	return s.getCredential(ctx, taskID, false)
+}
+
+func (s *Store) getCredential(ctx context.Context, taskID string, useCache bool) (domain.HandoverCredential, error) {
+	if !useCache {
+		return s.queryCredential(ctx, taskID, false)
+	}
+	s.credentialMu.RLock()
+	if cached, ok := s.credentialCache[taskID]; ok {
+		s.credentialMu.RUnlock()
+		if !cached.found {
+			return domain.HandoverCredential{}, domain.NotFound("凭据", taskID)
+		}
+		return cached.credential, nil
+	}
+	s.credentialMu.RUnlock()
+	return s.queryCredential(ctx, taskID, true)
+}
+
+func (s *Store) queryCredential(ctx context.Context, taskID string, cacheResult bool) (domain.HandoverCredential, error) {
 	var c domain.HandoverCredential
 	var issued string
 	err := s.db.QueryRowContext(ctx, `SELECT id,task_id,serial_no,manifest_digest,issued_by,issued_at,payload_json FROM credentials WHERE task_id=? ORDER BY issued_at DESC LIMIT 1`, taskID).Scan(&c.ID, &c.TaskID, &c.SerialNo, &c.ManifestDigest, &c.IssuedBy, &issued, &c.PayloadJSON)
 	if errors.Is(err, sql.ErrNoRows) {
+		if cacheResult {
+			s.credentialMu.Lock()
+			s.credentialCache[taskID] = credentialCacheEntry{}
+			s.credentialMu.Unlock()
+		}
 		return c, domain.NotFound("凭据", taskID)
 	}
 	if err != nil {
 		return c, err
 	}
 	c.IssuedAt, _ = time.Parse(time.RFC3339Nano, issued)
+	if cacheResult {
+		s.credentialMu.Lock()
+		s.credentialCache[taskID] = credentialCacheEntry{credential: c, found: true}
+		s.credentialMu.Unlock()
+	}
 	return c, nil
 }
 func (s *Store) NextSerial(ctx context.Context) (string, error) {
