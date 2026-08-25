@@ -13,8 +13,10 @@ import (
 )
 
 type Chain struct {
-	store *store.Store
-	now   func() time.Time
+	store      *store.Store
+	now        func() time.Time
+	tailLoaded bool
+	tailDigest string
 }
 
 func New(repository *store.Store) *Chain { return &Chain{store: repository, now: time.Now} }
@@ -34,23 +36,30 @@ func (c *Chain) Append(ctx context.Context, taskID string, actor domain.Actor, a
 	if strings.TrimSpace(actor.Name) == "" {
 		return domain.Validation("actor", "审计操作者不能为空")
 	}
+	if !c.tailLoaded {
+		events, err := c.store.AuditEvents(ctx)
+		if err != nil {
+			return err
+		}
+		if len(events) > 0 {
+			c.tailDigest = events[len(events)-1].Digest
+		}
+		c.tailLoaded = true
+	}
+	previous := c.tailDigest
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("编码审计载荷: %w", err)
-	}
-	events, err := c.store.AuditEvents(ctx)
-	if err != nil {
-		return err
-	}
-	previous := ""
-	if len(events) > 0 {
-		previous = events[len(events)-1].Digest
 	}
 	created := c.now().UTC()
 	content := eventContent{TaskID: taskID, Actor: actor.Name, Action: action, ObjectVersion: version, IdempotencyKey: key, PayloadJSON: string(encoded), PreviousDigest: previous, CreatedAt: created.Format(time.RFC3339Nano)}
 	canonical, _ := json.Marshal(content)
 	event := domain.AuditEvent{TaskID: taskID, Actor: actor.Name, Action: action, ObjectVersion: version, IdempotencyKey: key, PayloadJSON: string(encoded), PreviousDigest: previous, Digest: eventDigest(canonical), CreatedAt: created}
-	return c.store.AppendAudit(ctx, event)
+	if err := c.store.AppendAudit(ctx, event); err != nil {
+		return err
+	}
+	c.tailDigest = event.Digest
+	return nil
 }
 
 func (c *Chain) Verify(ctx context.Context) error {
