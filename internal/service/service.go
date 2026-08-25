@@ -14,13 +14,19 @@ import (
 )
 
 type Service struct {
-	store *store.Store
-	audit *audit.Chain
-	now   func() time.Time
+	store          *store.Store
+	audit          *audit.Chain
+	now            func() time.Time
+	preflightCache map[string]string
 }
 
 func New(repository *store.Store) *Service {
-	return &Service{store: repository, audit: audit.New(repository), now: time.Now}
+	return &Service{
+		store:          repository,
+		audit:          audit.New(repository),
+		now:            time.Now,
+		preflightCache: make(map[string]string),
+	}
 }
 
 type CreateTaskInput struct {
@@ -777,6 +783,17 @@ type ReworkInput struct {
 }
 
 func (s *Service) Preflight(ctx context.Context, taskID string) (domain.ReleasePreflight, error) {
+	task, err := s.store.GetTask(ctx, taskID)
+	if err != nil {
+		return domain.ReleasePreflight{}, err
+	}
+	cacheKey := fmt.Sprintf("%s:%d", taskID, task.Version)
+	if cached, ok := s.preflightCache[cacheKey]; ok {
+		var out domain.ReleasePreflight
+		if err := json.Unmarshal([]byte(cached), &out); err == nil {
+			return out, nil
+		}
+	}
 	agg, err := s.GetAggregate(ctx, taskID)
 	if err != nil {
 		return domain.ReleasePreflight{}, err
@@ -808,6 +825,9 @@ func (s *Service) Preflight(ctx context.Context, taskID string) (domain.ReleaseP
 		out.Ready = true
 		out.ManifestJSON = manifest
 		out.ManifestDigest = digest
+	}
+	if encoded, err := json.Marshal(out); err == nil {
+		s.preflightCache[cacheKey] = string(encoded)
 	}
 	return out, nil
 }
