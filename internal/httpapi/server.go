@@ -356,9 +356,13 @@ func (s *Server) HandlePreflight(w http.ResponseWriter, r *http.Request, taskID 
 }
 
 func (s *Server) decode(w http.ResponseWriter, r *http.Request, target any) bool {
-	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
+	decoded := make(chan error, 1)
+	go func() {
+		decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+		decoder.DisallowUnknownFields()
+		decoded <- decoder.Decode(target)
+	}()
+	if err := <-decoded; err != nil {
 		s.writeError(w, domain.Validation("body", "请求 JSON 无效: %v", err))
 		return false
 	}
