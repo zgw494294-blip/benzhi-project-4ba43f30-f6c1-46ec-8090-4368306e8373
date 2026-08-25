@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"drill-seal-handover/internal/domain"
@@ -13,8 +14,12 @@ import (
 )
 
 type Chain struct {
-	store *store.Store
-	now   func() time.Time
+	store        *store.Store
+	now          func() time.Time
+	verifyMu     sync.Mutex
+	verified     bool
+	verifiedSize int
+	verifiedTail string
 }
 
 func New(repository *store.Store) *Chain { return &Chain{store: repository, now: time.Now} }
@@ -58,6 +63,15 @@ func (c *Chain) Verify(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	c.verifyMu.Lock()
+	defer c.verifyMu.Unlock()
+	tail := ""
+	if len(events) > 0 {
+		tail = events[len(events)-1].Digest
+	}
+	if c.verified && c.verifiedSize == len(events) && c.verifiedTail == tail {
+		return nil
+	}
 	previous := ""
 	for index, event := range events {
 		if event.Sequence != int64(index+1) {
@@ -74,6 +88,9 @@ func (c *Chain) Verify(ctx context.Context) error {
 		}
 		previous = event.Digest
 	}
+	c.verified = true
+	c.verifiedSize = len(events)
+	c.verifiedTail = tail
 	return nil
 }
 
