@@ -7,13 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"drill-seal-handover/internal/domain"
 	_ "modernc.org/sqlite"
 )
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db                *sql.DB
+	planSnapshotsMu   sync.RWMutex
+	planSnapshotCache map[string][]domain.PlanSnapshot
+}
 
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
@@ -21,7 +26,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(sqliteConnectionLimit)
-	s := &Store{db: db}
+	s := &Store{db: db, planSnapshotCache: make(map[string][]domain.PlanSnapshot)}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -219,10 +224,21 @@ func (s *Store) SavePlanSnapshot(ctx context.Context, snapshot domain.PlanSnapsh
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT OR REPLACE INTO plan_snapshots(task_id,plan_version,segments_json,published_by,published_at) VALUES(?,?,?,?,?)`, snapshot.TaskID, snapshot.PlanVersion, string(encoded), snapshot.PublishedBy, snapshot.PublishedAt.UTC().Format(time.RFC3339Nano))
+	if err == nil {
+		s.planSnapshotsMu.Lock()
+		delete(s.planSnapshotCache, snapshot.TaskID)
+		s.planSnapshotsMu.Unlock()
+	}
 	return err
 }
 
 func (s *Store) ListPlanSnapshots(ctx context.Context, taskID string) ([]domain.PlanSnapshot, error) {
+	s.planSnapshotsMu.RLock()
+	cached, ok := s.planSnapshotCache[taskID]
+	s.planSnapshotsMu.RUnlock()
+	if ok {
+		return cached, nil
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT task_id,plan_version,segments_json,published_by,published_at FROM plan_snapshots WHERE task_id=? ORDER BY plan_version`, taskID)
 	if err != nil {
 		return nil, err
@@ -239,7 +255,13 @@ func (s *Store) ListPlanSnapshots(ctx context.Context, taskID string) ([]domain.
 		x.PublishedAt, _ = time.Parse(time.RFC3339Nano, at)
 		out = append(out, x)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	s.planSnapshotsMu.Lock()
+	s.planSnapshotCache[taskID] = out
+	s.planSnapshotsMu.Unlock()
+	return out, nil
 }
 
 func (s *Store) GetPlanSnapshot(ctx context.Context, taskID string, version int64) (domain.PlanSnapshot, error) {
