@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"drill-seal-handover/internal/audit"
@@ -14,9 +15,15 @@ import (
 )
 
 type Service struct {
+	store            *store.Store
+	audit            *audit.Chain
+	now              func() time.Time
+	aggregateLoaders sync.Map
+}
+
+type aggregateLoader struct {
+	ctx   context.Context
 	store *store.Store
-	audit *audit.Chain
-	now   func() time.Time
 }
 
 func New(repository *store.Store) *Service {
@@ -618,36 +625,48 @@ func (s *Service) IssueCredential(ctx context.Context, taskID string, input Issu
 }
 
 func (s *Service) GetAggregate(ctx context.Context, taskID string) (domain.Aggregate, error) {
-	task, err := s.store.GetTask(ctx, taskID)
+	if value, ok := s.aggregateLoaders.Load(taskID); ok {
+		return value.(*aggregateLoader).load(taskID)
+	}
+	loader := &aggregateLoader{ctx: ctx, store: s.store}
+	agg, err := loader.load(taskID)
+	if err == nil && agg.Task.Status == domain.TaskDraft {
+		s.aggregateLoaders.LoadOrStore(taskID, loader)
+	}
+	return agg, err
+}
+
+func (l *aggregateLoader) load(taskID string) (domain.Aggregate, error) {
+	task, err := l.store.GetTask(l.ctx, taskID)
 	if err != nil {
 		return domain.Aggregate{}, err
 	}
-	segments, err := s.store.ListSegments(ctx, taskID)
+	segments, err := l.store.ListSegments(l.ctx, taskID)
 	if err != nil {
 		return domain.Aggregate{}, err
 	}
-	deviations, err := s.store.ListDeviations(ctx, taskID)
+	deviations, err := l.store.ListDeviations(l.ctx, taskID)
 	if err != nil {
 		return domain.Aggregate{}, err
 	}
 	agg := domain.Aggregate{Task: task, Segments: segments, Deviations: deviations}
 	agg.Progress = domain.Progress(segments)
-	if usage, e := s.store.ListMaterialUsage(ctx, taskID); e != nil {
+	if usage, e := l.store.ListMaterialUsage(l.ctx, taskID); e != nil {
 		return agg, e
 	} else {
 		agg.MaterialUsage = usage
 	}
-	if reworks, e := s.store.ListReworks(ctx, taskID); e != nil {
+	if reworks, e := l.store.ListReworks(l.ctx, taskID); e != nil {
 		return agg, e
 	} else {
 		agg.Reworks = reworks
 	}
-	if reviews, e := s.store.ListReviews(ctx, taskID); e != nil {
+	if reviews, e := l.store.ListReviews(l.ctx, taskID); e != nil {
 		return agg, e
 	} else {
 		agg.Reviews = reviews
 	}
-	credential, err := s.store.GetCredential(ctx, taskID)
+	credential, err := l.store.GetCredential(l.ctx, taskID)
 	if err == nil {
 		agg.Credential = &credential
 	} else if domain.KindOf(err) != domain.KindNotFound {
